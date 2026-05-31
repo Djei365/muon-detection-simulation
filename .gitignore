@@ -1,0 +1,13 @@
+# Ignora a pasta de compilação inteira
+build/
+
+# Ignora dados e gráficos gerados
+*.csv
+*.png
+*.pdf
+
+# Ignora históricos do Geant4
+G4History.macro
+
+# Ignora configurações locais do VS Code
+.vscode/

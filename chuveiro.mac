@@ -1,0 +1,23 @@
+/vis/open OGL
+/vis/drawVolume
+/vis/viewer/set/viewpointThetaPhi 90 0
+/vis/viewer/zoom 0.5
+/vis/viewer/set/targetPoint 0. 0. 0. m
+
+# A LINHA MÁGICA QUE FALTOU (Manda desenhar os raios)
+/vis/scene/add/trajectories smooth
+
+# Desliga filtros para vermos a chuva completa
+/vis/filtering/trajectories/create/particleFilter
+/vis/filtering/trajectories/particleFilter-0/active false
+
+# Colore as partículas para análise visual
+/vis/modeling/trajectories/create/drawByParticleID
+/vis/modeling/trajectories/drawByParticleID-0/set gamma green
+/vis/modeling/trajectories/drawByParticleID-0/set e- red
+/vis/modeling/trajectories/drawByParticleID-0/set mu- blue
+
+# Acumula e dispara 100 eventos
+/vis/scene/endOfEventAction accumulate 100
+/run/beamOn 100
+/vis/viewer/flush
