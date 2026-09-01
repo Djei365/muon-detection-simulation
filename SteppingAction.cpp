@@ -4,11 +4,9 @@
 #include "G4RunManager.hh"
 #include "G4AnalysisManager.hh"
 #include "G4SystemOfUnits.hh"
-
 #include "G4Track.hh"
-#include "G4SystemOfUnits.hh"
 #include "G4ParticleDefinition.hh"
-
+#include "G4VPhysicalVolume.hh" // <-- ADICIONADO: Necessário para ler os nomes dos volumes
 
 SteppingAction::SteppingAction(EventAction*) : G4UserSteppingAction() {}
 SteppingAction::~SteppingAction() {}
@@ -23,9 +21,16 @@ void SteppingAction::UserSteppingAction(const G4Step* step)
         return;
     }
 
-    // Filtro 2: Registra apenas o primeiro passo dentro de um volume 
-    // (evita contar o mesmo múon várias vezes no mesmo milímetro)
-    if (step->IsFirstStepInVolume()) {
+    // Segurança: Verifica se o volume físico existe para evitar crashes
+    G4VPhysicalVolume* volumeAtual = step->GetPreStepPoint()->GetTouchableHandle()->GetVolume();
+    if (!volumeAtual) return; 
+
+    // Pega o nome do volume atual
+    G4String nomeVolume = volumeAtual->GetName();
+
+    // Filtro 2: Registra todos os passos (a cada 10cm) APENAS no ar e nas lajes.
+    // REMOVEMOS a trava IsFirstStepInVolume() para permitir o rastreio contínuo!
+    if (nomeVolume == "World" || nomeVolume == "Slab_1" || nomeVolume == "Slab_2" || nomeVolume == "Slab_3") {
         
         // 1. Altitude (Z) convertida para metros
         G4double z_m = track->GetPosition().z() / m;

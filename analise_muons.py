@@ -1,123 +1,163 @@
-import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib as mpl
+from matplotlib.ticker import LogLocator, NullFormatter
 
-# ====================================================================
-# PARÂMETROS MATEMÁTICOS PARA O FLUXO DIFERENCIAL
-# ====================================================================
-# Cone de aceitação estreito (0 a 7 graus) para simular fluxo vertical
-THETA_MAX_GRAUS = 7.0
-THETA_MAX_RAD = np.deg2rad(THETA_MAX_GRAUS)
+# 1. CONFIGURAÇÕES
 
-# Cálculo do Ângulo Sólido (Delta Omega) em esferorradianos (sr)
-DELTA_OMEGA = 2 * np.pi * (1 - np.cos(THETA_MAX_RAD))
+INPUT_FILE = "build/dados_completos.csv"
+OUTPUT_PNG = "muon_spectrum2.png"
+OUTPUT_PDF = "muon_spectrum2.pdf"
 
-# Fator de Normalização (Ajuste fino para bater com a escala 10^-3 do artigo)
-FATOR_DE_AJUSTE = 1e-6 
-CONSTANTE_NORMALIZACAO = FATOR_DE_AJUSTE * (1.0 / DELTA_OMEGA)
+Z_MIN  = 200.0    # mm  — só eventos que cruzam o detector
+P_MIN  = 0.9      # GeV/c — limite inferior dos bins
+P_MAX  = 1500.0   # GeV/c — limite superior dos bins
+N_BINS = 22       # número de bins logarítmicos
 
-# ====================================================================
-# 1. CARREGAMENTO E LIMPEZA DOS DADOS (LEITOR À PROVA DE BALAS)
-# ====================================================================
-print("A ler e extrair dados rigorosos do Geant4...")
+# Faixas de ângulo zenital [graus] e faixa de normalização [GeV/c]
+PANELS = [
+    # (label, zmin, zmax, norm_pmin, norm_pmax)
+    ("A",  0.0,  30.0,  5.0, 20.0),   # próximo da vertical
+    ("B", 30.0,  60.0,  3.0, 15.0),   # intermediário
+    ("C", 60.0,  90.0,  2.0, 10.0),   # próximo da horizontal
+]
 
-dados_limpos = []
-try:
-    with open('dados_completos.csv', 'r') as file:
-        for linha in file:
-            pedacos = linha.strip().split(',')
-            
-            # Só aceita linhas com 3 pedaços exatos (Z, Momento, Theta)
-            if len(pedacos) == 3:
-                try:
-                    # Limpa a assinatura de multithreading (ex: "G4WT2 > 244.8")
-                    z_str = pedacos[0].split('>')[-1].strip()
-                    
-                    # Força a conversão numérica
-                    z = float(z_str)
-                    momento = float(pedacos[1])
-                    theta = float(pedacos[2])
-                    
-                    dados_limpos.append([z, momento, theta])
-                except ValueError:
-                    # Ignora linhas de log do Geant4 misturadas no CSV
-                    pass
-except FileNotFoundError:
-    print("ERRO: O ficheiro 'dados_completos.csv' não foi encontrado.")
-    exit()
+# 2. MODELOS TEÓRICOS  — fluxo em (cm² s sr GeV/c)⁻¹
 
-df = pd.DataFrame(dados_limpos, columns=['Altura_Z_m', 'Momento_GeV', 'Theta_rad'])
+def gaisser_tang(p, theta):
+    """Gaisser-Tang (2002) — usado internamente para normalização."""
+    ct = np.cos(theta)
+    ct_eff = np.sqrt(ct**2
+                     + 0.102573**2
+                     - 0.068287 * ct**0.958633
+                     + 0.0407253 * ct**0.817285)
+    return (0.14 * p**(-2.7)
+            * (1.0 / (1 + 1.1*p*ct_eff/115.0)
+               + 0.054 / (1 + 1.1*p*ct_eff/850.0)))
 
-if len(df) == 0:
-    print("Nenhum dado válido extraído. Verifique a simulação.")
-    exit()
+# 3. LEITURA DOS DADOS
 
-# Converte radianos para graus e filtra o fluxo estritamente vertical
-df['Theta_deg'] = np.rad2deg(df['Theta_rad'])
-df_vertical = df[df['Theta_deg'] <= THETA_MAX_GRAUS]
+def parse_data(filepath):
+    """Extrai (p, zenith) de cada linha G4WTx do CSV do Geant4."""
+    p_list, zenith_list = [], []
+    with open(filepath) as f:
+        for line in f:
+            if not line.startswith("G4WT"):
+                continue
+            try:
+                vals  = line.split("> ")[1].strip().split(",")
+                z     = float(vals[0])
+                p     = float(vals[1])
+                theta = float(vals[2])
+            except Exception:
+                continue
+            if z > Z_MIN and p > 0:
+                p_list.append(p)
+                zenith_list.append(np.pi - theta)   # ângulo zenital em rad
+    return np.array(p_list), np.array(zenith_list)
 
-print(f"Dados extraídos com sucesso! Múons verticais: {len(df_vertical):,}\n")
+# 4. BINAGEM E CÁLCULO DO FLUXO
 
-# ====================================================================
-# 2. GERAÇÃO DO GRÁFICO (Estilo ROOT / Artigo Científico)
-# ====================================================================
-print("A gerar o Espectro Diferencial...")
+def compute_flux(p_sim, zenith_sim, zmin_deg, zmax_deg,
+                 p_bins, norm_pmin, norm_pmax):
+    """
+    Converte contagens simuladas em fluxo diferencial.
 
-# Configuração de estilo exigida em publicações de física
-mpl.rcdefaults() 
-plt.style.use('default') 
-plt.rcParams.update({
-    'xtick.direction': 'in', 'ytick.direction': 'in',
-    'xtick.top': True, 'ytick.right': True,
-    'axes.linewidth': 1.5, 'font.family': 'serif'
-})
+    Phi(p) = dN / (dp · A·T · dΩ)
 
-def calcular_fluxo_diferencial(dados_momento, bins):
-    contagens, margens_bins = np.histogram(dados_momento, bins=bins)
-    larguras_bins = np.diff(margens_bins)
-    fluxo = (contagens * CONSTANTE_NORMALIZACAO) / larguras_bins
-    return fluxo, margens_bins
+    O fator A·T é estimado igualando as contagens ao modelo Gaisser-Tang
+    na faixa [norm_pmin, norm_pmax] GeV/c.
+    Se souber A (cm²) e T (s) do código C++, substitua AT diretamente.
+    """
+    zd   = np.degrees(zenith_sim)
+    mask = (zd >= zmin_deg) & (zd < zmax_deg)
 
-plt.figure(figsize=(9, 7))
-plt.yscale('log')
-plt.xscale('log')
+    theta_mean = float(np.mean(zenith_sim[mask]))
+    dOmega     = 2.0 * np.pi * (np.cos(np.radians(zmin_deg))
+                                 - np.cos(np.radians(zmax_deg)))
 
-# Isola as populações de interesse
-muons_topo = df_vertical[df_vertical['Altura_Z_m'] > 15]['Momento_GeV']
-muons_chao = df_vertical[df_vertical['Altura_Z_m'] <= 5]['Momento_GeV']
+    count, _ = np.histogram(p_sim[mask], bins=p_bins)
+    bc = np.sqrt(p_bins[:-1] * p_bins[1:])   # centro geométrico de cada bin
+    bw = np.diff(p_bins)
 
-# Escala idêntica aos artigos acadêmicos de referência (10^0 a 10^3)
-bins_log = np.logspace(0, 3, 40)
+    # Ajuste de normalização
+    m_norm   = (bc >= norm_pmin) & (bc <= norm_pmax)
+    expected = gaisser_tang(bc[m_norm], theta_mean) * dOmega * bw[m_norm]
+    AT       = float(np.sum(count[m_norm]) / np.sum(expected))
 
-fluxo_topo, margens = calcular_fluxo_diferencial(muons_topo, bins_log)
-fluxo_chao, _ = calcular_fluxo_diferencial(muons_chao, bins_log)
+    denom = AT * dOmega * bw
+    flux  = np.where(count > 0, count / denom, 0.0)
+    ferr  = np.where(count > 0, np.sqrt(count) / denom, 0.0)
 
-# Desenha as curvas em formato de degrau (step)
-plt.step(margens[:-1], fluxo_topo, where='post', color='black', linewidth=2.0, 
-         label='Geant4: Topo ($>15$ m)')
-plt.step(margens[:-1], fluxo_chao, where='post', color='red', linestyle='--', linewidth=2.0, 
-         label=r'Geant4: Solo ($\leq 5$ m)')
+    return bc, flux, ferr, count, theta_mean
 
-# Títulos e formatação matemática dos eixos
-plt.title('Espectro de Momento Diferencial dos Múons ($\\theta \\approx 0^{\\circ}$)', fontsize=14, pad=15)
-plt.xlabel('$p$ / (GeV/c)', fontsize=13)
-plt.ylabel('$\\Phi(p, \\theta)$ / (GeV/c)$^{-1} \\cdot$ cm$^{-2} \\cdot$ sr$^{-1} \\cdot$ s$^{-1}$', fontsize=13)
+# 5. PLOTAGEM
 
-# Ajuste fino das marcações dos eixos logarítmicos
-plt.minorticks_on()
-plt.tick_params(which='major', length=8, width=1.2)
-plt.tick_params(which='minor', length=4, width=0.8)
-plt.xlim(1, 1000)
+def draw_panel(ax, label, zmin, zmax, bc, flux, ferr, count):
+    ax.set_xscale("log")
+    ax.set_yscale("log")
 
-plt.legend(frameon=False, fontsize=12, loc='lower left')
-plt.tight_layout()
+    m = count > 0
+    ax.errorbar(bc[m], flux[m], yerr=ferr[m],
+                fmt="o", color="red", markeredgecolor="darkred",
+                ms=4.5, elinewidth=0.9, capsize=2,
+                label="Simulação (CRY)", zorder=5)
 
-# Salva a imagem final
-nome_arquivo = 'espectro_diferencial_isolado.png'
-plt.savefig(nome_arquivo, dpi=300)
-plt.close()
+    ax.set_xlim(1, 1000)
+    ax.set_ylim(1e-11, 1e-1)
+    ax.set_xlabel(r"$p$ /(GeV/c)", fontsize=12)
+    ax.set_ylabel(
+        r"$\Phi(p,\theta)$/(GeV/c)$^{-1}\!\cdot$cm$^{-2}\!\cdot$sr$^{-1}\!\cdot$s$^{-1}$",
+        fontsize=10)
 
-print("==========================================================")
-print(f"SUCESSO! O gráfico '{nome_arquivo}' foi gerado na sua pasta.")
-print("==========================================================")
+    # Label do painel + faixa angular
+    ax.text(0.03, 0.97, label, transform=ax.transAxes,
+            fontsize=15, fontweight="bold", va="top")
+    ax.text(0.97, 0.97, rf"$\theta$ = {zmin:.0f}°–{zmax:.0f}°",
+            transform=ax.transAxes, fontsize=9,
+            va="top", ha="right", color="0.35")
+
+    ax.grid(True, which="major", alpha=0.25, linestyle=":", lw=0.6)
+    ax.grid(True, which="minor", alpha=0.10, linestyle=":", lw=0.4)
+    ax.tick_params(which="both", direction="in", top=True, right=True)
+    ax.xaxis.set_minor_locator(LogLocator(subs=np.arange(2, 10) * 0.1))
+    ax.xaxis.set_minor_formatter(NullFormatter())
+    ax.yaxis.set_minor_locator(LogLocator(subs=np.arange(2, 10) * 0.1))
+    ax.yaxis.set_minor_formatter(NullFormatter())
+    ax.legend(fontsize=8.5, loc="lower left", framealpha=0.85, edgecolor="0.7")
+
+
+def main():
+    # --- Leitura ---
+    print(f"Lendo {INPUT_FILE} ...")
+    p_sim, zenith_sim = parse_data(INPUT_FILE)
+    print(f"  {len(p_sim)} eventos válidos | "
+          f"p = [{p_sim.min():.2f}, {p_sim.max():.1f}] GeV/c")
+
+    # --- Bins ---
+    p_bins = np.logspace(np.log10(P_MIN), np.log10(P_MAX), N_BINS)
+
+    # --- Figura: 3 painéis empilhados ---
+    plt.rcParams.update({"font.family": "serif", "font.size": 11,
+                         "axes.linewidth": 0.8})
+    fig, axes = plt.subplots(3, 1, figsize=(7.0, 15.0),
+                             dpi=120, facecolor="white")
+
+    for ax, (label, zmin, zmax, np_min, np_max) in zip(axes, PANELS):
+        bc, flux, ferr, count, theta_mean = compute_flux(
+            p_sim, zenith_sim, zmin, zmax, p_bins, np_min, np_max)
+        print(f"Painel {label} ({zmin:.0f}°–{zmax:.0f}°): "
+              f"{count.sum()} eventos | ⟨θ⟩ = {np.degrees(theta_mean):.1f}°")
+        draw_panel(ax, label, zmin, zmax, bc, flux, ferr, count)
+
+    plt.tight_layout(h_pad=3.0)
+
+    for fname in (OUTPUT_PNG, OUTPUT_PDF):
+        plt.savefig(fname, dpi=300, bbox_inches="tight")
+        print(f"Salvo → {fname}")
+    plt.close()
+
+
+if __name__ == "__main__":
+    main()
