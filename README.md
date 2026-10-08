@@ -114,7 +114,3 @@ Universidade Tecnológica Federal do Paraná (UTFPR), campus Toledo, 2026.
 ## Agradecimentos
 
 Desenvolvido com apoio da Fundação Araucária (bolsa de Iniciação Científica) e da Universidade Tecnológica Federal do Paraná (UTFPR).
-
-## Licença
-
-_Adicione aqui a licença escolhida para o repositório (ex.: MIT, GPL-3.0), caso ainda não tenha uma definida._
